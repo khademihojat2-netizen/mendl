@@ -1,2 +1,3 @@
-python-telegram-bot==21.6
+python-telegram-bot==20.6  # یا آخرین نسخه پایدار 20.x که API async دارد
 yt-dlp
+aiohttp
