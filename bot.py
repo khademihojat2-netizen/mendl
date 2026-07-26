@@ -41,13 +41,17 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ خطا: {e}")
 
-def main():
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
-    print("Bot started...")
-    # اجرای بلاک‌کننده؛ نیازی به asyncio.run یا loop نیست
-    app.run_polling()
+    app.add_handler(...)
+    await app.initialize()
+    await app.start()
+    try:
+        await app.updater.start_polling()
+        await asyncio.Event().wait()  # نگه داشتن برنامه
+    finally:
+        await app.shutdown()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+
