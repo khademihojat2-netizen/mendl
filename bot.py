@@ -1,5 +1,10 @@
+# bot.py
 import os
 import logging
+import tempfile
+from pathlib import Path
+
+import yt_dlp
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -8,73 +13,95 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import yt_dlp
-import asyncio
 
-# Logging
-logging.basicConfig(level=logging.INFO)
+# --- Configuration from environment ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+AUTHORIZED_USER = os.environ.get("AUTHORIZED_USER")  # optional: Telegram user id as string
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is required")
+
+# --- Logging ---
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-AUTHORIZED_USER = os.environ.get("AUTHORIZED_USER")  # optional
-
+# --- Helpers ---
 def is_authorized(user_id: int) -> bool:
-    if not AUTHORIZED_USER:
+    if AUTHORIZED_USER is None:
         return True
     try:
         return str(user_id) == str(AUTHORIZED_USER)
     except Exception:
         return False
 
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("سلام! ربات آماده است.")
+    user = update.effective_user
+    await update.message.reply_text(
+        f"سلام {user.first_name}!\nلطفا لینک ویدیو را ارسال کنید تا دانلود و ارسال شود."
+    )
 
-async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    user = update.effective_user
+    if not is_authorized(user.id):
+        await msg.reply_text("شما مجاز نیستید.")
+        return
+
+    text = msg.text.strip()
+    url = text.split()[0] if text else None
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        await msg.reply_text("لطفا یک لینک معتبر ارسال کنید.")
+        return
+
+    await msg.reply_text("در حال دانلود... لطفا صبر کنید.")
     try:
-        user = update.effective_user
-        if not is_authorized(user.id):
-            await update.message.reply_text("شما مجاز نیستید.")
-            return
-
-        text = update.message.text.strip()
-        url = text.split()[0]  # ساده‌سازی: اولین کلمه را URL فرض می‌کنیم
-        await update.message.reply_text("در حال دانلود...")
-
-        ydl_opts = {
-            "format": "mp4",
-            "outtmpl": "video.mp4",
-            "quiet": True,
-            "no_warnings": True,
-        }
-
-        # اجرای yt-dlp در thread جدا تا حلقهٔ async مسدود نشود
-        loop = asyncio.get_running_loop()
-        def run_ydl():
+        # use a temporary file to avoid collisions
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "video.%(ext)s"
+            ydl_opts = {
+                "format": "mp4/best",
+                "outtmpl": str(out_path),
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "retries": 3,
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-
-        await loop.run_in_executor(None, run_ydl)
-
-        # ارسال ویدیو
-        with open("video.mp4", "rb") as f:
-            await update.message.reply_video(video=f)
+                info = ydl.extract_info(url, download=True)
+                # find downloaded filename
+                filename = ydl.prepare_filename(info)
+                # ensure mp4 extension if possible
+                if not Path(filename).exists():
+                    # try to find any file in tmpdir
+                    files = list(Path(tmpdir).glob("*"))
+                    if files:
+                        filename = str(files[0])
+                # send video (use reply_video for Telegram)
+                with open(filename, "rb") as f:
+                    await msg.reply_video(video=f)
     except Exception as e:
-        logger.exception("Download error")
-        await update.message.reply_text(f"❌ خطا: {e}")
+        logger.exception("Download failed")
+        await msg.reply_text(f"❌ خطا در دانلود یا ارسال ویدیو:\n{e}")
 
-def build_app():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is not set.")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
-    return app
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("ارسال لینک ویدیو برای دانلود. فقط mp4 یا فرمت‌های پشتیبانی‌شده.")
 
+# --- Main (synchronous) ---
 def main():
-    app = build_app()
+    # Build application
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Register handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
+
     logger.info("Bot started...")
-    # run_polling مدیریت حلقهٔ asyncio را خودش انجام می‌دهد؛
-    # **هیچ** asyncio.run یا loop.run_until_complete در سطح ماژول نباید باشد.
+    # run_polling is blocking and manages its own event loop internally
     app.run_polling()
 
 if __name__ == "__main__":
