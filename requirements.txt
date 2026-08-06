@@ -1,3 +1,0 @@
-python-telegram-bot==20.6
-yt-dlp==2026.7.1
-aiohttp==3.8.4
