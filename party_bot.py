@@ -12,7 +12,7 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه، دکمه M
 
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -23,7 +23,9 @@ from telegram.ext import (
 # ---------------- تنظیمات ----------------
 # از Environment Variables توی Railway خونده میشه.
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-MINI_APP_URL = os.environ["MINI_APP_URL"]  # لینک https صفحه party-entrance.html که هاست کردی
+# لینک مستقیم Mini App که از BotFather (/newapp) گرفتی، شبیه:
+# https://t.me/USERNAME_BOT/party
+MINI_APP_DEEPLINK = os.environ["MINI_APP_DEEPLINK"]
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("party_bot")
@@ -36,8 +38,10 @@ async def welcome_with_party_button(update: Update, context: ContextTypes.DEFAUL
     chat_id = update.effective_chat.id
     names = ", ".join(m.first_name for m in update.message.new_chat_members)
 
+    # توی گروه‌ها فقط دکمه URL معمولی (نه web_app inline) مجازه؛
+    # این لینک با باز شدنش خودش Mini App رو داخل تلگرام باز می‌کنه.
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("ورود به مهمونی 🎉", web_app=WebAppInfo(url=MINI_APP_URL))]
+        [InlineKeyboardButton("ورود به مهمونی 🎉", url=MINI_APP_DEEPLINK)]
     ])
 
     await context.bot.send_message(
