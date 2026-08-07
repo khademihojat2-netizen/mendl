@@ -16,6 +16,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
+    CommandHandler,
     MessageHandler,
     filters,
 )
@@ -51,8 +52,19 @@ async def welcome_with_party_button(update: Update, context: ContextTypes.DEFAUL
     )
 
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("ورود به مهمونی 🎉", url=MINI_APP_DEEPLINK)]
+    ])
+    await update.message.reply_text(
+        "سلام! برای ورود به مهمونی دکمه زیر رو بزن 👇",
+        reply_markup=keyboard,
+    )
+
+
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_with_party_button))
     log.info("Party bot started...")
     app.run_polling()
