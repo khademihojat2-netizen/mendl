@@ -22,7 +22,7 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
 
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -116,9 +116,24 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🎉 تا الان {count} بار مهمونی توی این گروه شروع شده!")
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    known = "\n".join(f"• /party {name}" for name in sorted(set(OCCASIONS.keys())))
+    text = (
+        "🎉 راهنمای بات پارتی 🎉\n\n"
+        "دستورهای موجود:\n"
+        "• /party — شروع مهمونی با تم معمولی\n"
+        f"{known}\n"
+        "• /partystats — تعداد دفعاتی که مهمونی توی این گروه شروع شده\n"
+        "• /help — همین راهنما\n\n"
+        "هر عضو گروه می‌تونه این دستورها رو بزنه، محدودیتی نداره."
+    )
+    await update.message.reply_text(text)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سلام! برای ورود به مهمونی دکمه زیر رو بزن 👇",
+        "سلام! برای ورود به مهمونی دکمه زیر رو بزن 👇\n"
+        "برای دیدن همه‌ی دستورها /help رو بزن.",
         reply_markup=party_button(),
     )
 
@@ -127,12 +142,24 @@ async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("خطا هنگام پردازش یه آپدیت: %s", context.error, exc_info=context.error)
 
 
+async def post_init(app):
+    """لیست دستورها رو توی منوی خودکار تلگرام (وقتی / تایپ میشه) ثبت می‌کنه
+    تا همه‌ی اعضای گروه بدون نیاز به پرسیدن، خودشون گزینه‌ها رو ببینن."""
+    await app.bot.set_my_commands([
+        BotCommand("party", "شروع مهمونی (مثال: /party تولد یا /party سال_نو)"),
+        BotCommand("partystats", "تعداد دفعاتی که مهمونی شروع شده"),
+        BotCommand("help", "راهنمای کامل دستورها و مناسبت‌ها"),
+        BotCommand("start", "شروع کار با بات"),
+    ])
+
+
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("party", party_command))
     app.add_handler(CommandHandler("partystats", stats_command))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_with_party_button))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, goodbye_message))
     app.add_error_handler(error_handler)
