@@ -6,6 +6,9 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
 قابلیت‌ها:
 - خوش‌آمد خودکار به اعضای جدید با دکمه ورود به مهمونی
 - دستور دستی /party برای شروع مهمونی هر موقع که بخوای
+  - /party تولد  -> تم تولد
+  - /party سال_نو -> تم سال نو
+  - /party (بدون آرگومان) -> تم پیش‌فرض
 - پیام خداحافظی وقتی کسی گروه رو ترک می‌کنه
 - شمارنده‌ی تعداد دفعاتی که مهمونی شروع شده (در حافظه)
 - هندلر خطا تا کرش نکنه اگه یه درخواست به تلگرام fail بشه
@@ -37,14 +40,24 @@ MINI_APP_DEEPLINK = os.environ["MINI_APP_DEEPLINK"]
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("party_bot")
 
-# شمارنده‌ی ساده در حافظه (با ری‌استارت بات صفر میشه؛ برای شمارش دائمی
-# بعداً میشه یه دیتابیس سبک مثل SQLite اضافه کرد)
 party_count = {}  # chat_id -> تعداد دفعات شروع مهمونی
 
+# کلیدواژه‌ای که کاربر بعد از /party می‌نویسه -> کد تم (start_param)
+OCCASIONS = {
+    "تولد": "birthday",
+    "سال_نو": "newyear",
+    "سال نو": "newyear",
+    "کریسمس": "christmas",
+}
 
-def party_button():
+
+def party_button(occasion_code: str | None = None):
+    url = MINI_APP_DEEPLINK
+    if occasion_code:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}startapp={occasion_code}"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("ورود به مهمونی 🎉", url=MINI_APP_DEEPLINK)]
+        [InlineKeyboardButton("ورود به مهمونی 🎉", url=url)]
     ])
 
 
@@ -75,18 +88,29 @@ async def goodbye_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def party_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور دستی /party - هرکسی توی گروه میتونه مهمونی رو دستی شروع کنه."""
+    """
+    دستور دستی /party [مناسبت]
+    مثال: /party تولد   یا   /party سال_نو   یا فقط /party
+    """
     chat_id = update.effective_chat.id
     party_count[chat_id] = party_count.get(chat_id, 0) + 1
 
+    occasion_text = " ".join(context.args) if context.args else None
+    occasion_code = OCCASIONS.get(occasion_text) if occasion_text else None
+
+    if occasion_text and not occasion_code:
+        known = "، ".join(sorted(set(OCCASIONS.keys())))
+        await update.message.reply_text(f"این مناسبت رو نمی‌شناسم. گزینه‌های موجود: {known}")
+        return
+
+    label = f"مهمونی {occasion_text} شروع شد! 🎊" if occasion_text else "مهمونی شروع شد! 🎊"
     await update.message.reply_text(
-        "مهمونی شروع شد! 🎊 دکمه زیرو بزن:",
-        reply_markup=party_button(),
+        f"{label} دکمه زیرو بزن:",
+        reply_markup=party_button(occasion_code),
     )
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دستور /partystats - تعداد دفعاتی که مهمونی توی این گروه شروع شده."""
     chat_id = update.effective_chat.id
     count = party_count.get(chat_id, 0)
     await update.message.reply_text(f"🎉 تا الان {count} بار مهمونی توی این گروه شروع شده!")
@@ -100,7 +124,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    """هندلر مرکزی خطا - جای کرش کردن، فقط لاگ میکنه."""
     log.error("خطا هنگام پردازش یه آپدیت: %s", context.error, exc_info=context.error)
 
 
