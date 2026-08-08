@@ -17,6 +17,8 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
 - هندلر خطا تا کرش نکنه اگه یه درخواست به تلگرام fail بشه
 - وب‌سرور واسطه (Flask) برای پروکسی درخواست موزیک به Jamendo، تا اگه
   Jamendo از سمت کاربر فیلتر بود، مشکلی برای پیدا کردن آهنگ پیش نیاد
+- چت‌بات هوشمند: با منشن کردن بات (@) یا ریپلای به پیامش، سوال بپرس
+  و با Groq جواب می‌گیری
 
 نصب:
     pip install python-telegram-bot==21.4 requests flask
@@ -170,11 +172,10 @@ async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("خطا هنگام پردازش یه آپدیت: %s", context.error, exc_info=context.error)
 
 
-async def ai_is_offensive(text: str) -> bool:
-    """پیام رو با Groq چک می‌کنه که ناسزا/توهین/فحش هست یا نه (فارسی یا هر زبان دیگه).
-    فقط وقتی GROQ_API_KEY ست شده باشه فعاله."""
+async def ask_groq(system_prompt: str, user_text: str, max_tokens: int = 300) -> str | None:
+    """یه فراخوانی عمومی به Groq؛ برای فیلتر ناسزا و چت‌بات هردو ازش استفاده می‌شه."""
     if not GROQ_API_KEY:
-        return False
+        return None
 
     def call_api():
         try:
@@ -186,32 +187,67 @@ async def ai_is_offensive(text: str) -> bool:
                 },
                 json={
                     "model": GROQ_MODEL,
-                    "max_tokens": 5,
-                    "temperature": 0,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.7,
                     "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "تو یه فیلتر تشخیص ناسزا/فحش/توهین هستی. فقط با یک کلمه جواب بده: "
-                                "'بله' اگه پیام حاوی فحش، ناسزا، توهین مستقیم به شخص، یا کلمات رکیک باشه "
-                                "(حتی با غلط‌املایی عمدی یا حروف انگلیسی برای نوشتن فارسی)، "
-                                "یا 'خیر' اگه پیام عادی و بی‌مشکل باشه."
-                            ),
-                        },
-                        {"role": "user", "content": text[:500]},
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text[:1500]},
                     ],
                 },
-                timeout=8,
+                timeout=15,
             )
             resp.raise_for_status()
-            data = resp.json()
-            reply = data["choices"][0]["message"]["content"].strip()
-            return reply.startswith("بله")
+            return resp.json()["choices"][0]["message"]["content"].strip()
         except Exception as e:
             log.error("خطا در تماس با Groq API: %s", e)
-            return False
+            return None
 
     return await asyncio.to_thread(call_api)
+
+
+async def ai_is_offensive(text: str) -> bool:
+    """پیام رو با Groq چک می‌کنه که ناسزا/توهین/فحش هست یا نه (فارسی یا هر زبان دیگه).
+    فقط وقتی GROQ_API_KEY ست شده باشه فعاله."""
+    reply = await ask_groq(
+        "تو یه فیلتر تشخیص ناسزا/فحش/توهین هستی. فقط با یک کلمه جواب بده: "
+        "'بله' اگه پیام حاوی فحش، ناسزا، توهین مستقیم به شخص، یا کلمات رکیک باشه "
+        "(حتی با غلط‌املایی عمدی یا حروف انگلیسی برای نوشتن فارسی)، "
+        "یا 'خیر' اگه پیام عادی و بی‌مشکل باشه.",
+        text,
+        max_tokens=5,
+    )
+    return bool(reply) and reply.startswith("بله")
+
+
+async def ai_chat_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اگه کسی بات رو منشن (@) کنه یا روی پیام بات ریپلای بزنه، با Groq جواب می‌ده.
+    فقط وقتی GROQ_API_KEY ست شده باشه فعاله."""
+    if not GROQ_API_KEY or not update.message or not update.message.text:
+        return
+
+    bot_username = context.bot.username
+    text = update.message.text
+    mentioned = bot_username and f"@{bot_username}" in text
+    is_reply_to_bot = (
+        update.message.reply_to_message
+        and update.message.reply_to_message.from_user
+        and update.message.reply_to_message.from_user.id == context.bot.id
+    )
+    if not (mentioned or is_reply_to_bot):
+        return
+
+    question = text.replace(f"@{bot_username}", "").strip() if mentioned else text
+    if not question:
+        return
+
+    reply = await ask_groq(
+        "تو دستیار هوشمند یه بات پارتی توی تلگرام هستی، اسمت هم همینه. "
+        "خودمونی، دوستانه و کوتاه (حداکثر ۲-۳ جمله) به فارسی جواب بده. "
+        "اگه سوال درباره‌ی خود مهمونی/موزیک بود، می‌تونی به دستور /party هم اشاره کنی.",
+        question,
+    )
+    if reply:
+        await update.message.reply_text(reply)
 
 
 async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -338,7 +374,8 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_with_party_button))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, goodbye_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderate_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderate_message), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat_reply), group=1)
     app.add_error_handler(error_handler)
 
     log.info("Party bot started...")
