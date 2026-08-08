@@ -1,1 +1,1 @@
-worker: python party_bot.py
+web: python party_bot.py
