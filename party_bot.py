@@ -16,8 +16,8 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
   - لایه هوشمند: طبقه‌بندی با هوش مصنوعی (Groq API - رایگان، نیاز به GROQ_API_KEY)
     تشخیص می‌ده پیام ناسزاست، اسپم/تبلیغ/لینک مشکوکه، یا عادیه
 - هندلر خطا تا کرش نکنه اگه یه درخواست به تلگرام fail بشه
-- وب‌سرور واسطه (Flask) برای پروکسی درخواست موزیک به Jamendo، تا اگه
-  Jamendo از سمت کاربر فیلتر بود، مشکلی برای پیدا کردن آهنگ پیش نیاد
+- وب‌سرور واسطه (Flask) برای پروکسی متادیتا و خودِ فایل صوتی از Jamendo،
+  تا اگه دامنه‌های Jamendo از سمت کاربر فیلتر بودن، مشکلی برای شنیدن آهنگ پیش نیاد
 - چت‌بات هوشمند: با منشن کردن بات (@) یا ریپلای به پیامش، سوال بپرس
   و با Groq جواب می‌گیری
 - خوش‌آمدگویی شخصی‌سازی‌شده: هر عضو جدید یه پیام خوش‌آمد متفاوت و
@@ -37,7 +37,8 @@ import logging
 import asyncio
 import threading
 import requests
-from flask import Flask, jsonify, request as flask_request
+from urllib.parse import urlparse
+from flask import Flask, jsonify, request as flask_request, Response, stream_with_context
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -447,6 +448,27 @@ def get_track():
 @flask_app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+@flask_app.route("/audio", methods=["GET"])
+def proxy_audio():
+    """خودِ فایل صوتی رو (نه فقط متادیتا) از سمت سرور استریم می‌کنه، چون CDN
+    جامندو (prod-*.storage.jamendo.com) ممکنه جدا از api.jamendo.com فیلتر باشه."""
+    audio_url = flask_request.args.get("url", "")
+    host = urlparse(audio_url).hostname or ""
+    if not host.endswith("jamendo.com"):
+        return jsonify({"error": "invalid host"}), 400
+
+    try:
+        upstream = requests.get(audio_url, stream=True, timeout=15)
+        upstream.raise_for_status()
+        return Response(
+            stream_with_context(upstream.iter_content(chunk_size=8192)),
+            content_type=upstream.headers.get("Content-Type", "audio/mpeg"),
+        )
+    except Exception as e:
+        log.error("خطا هنگام پروکسی فایل صوتی: %s", e)
+        return jsonify({"error": str(e)}), 502
 
 
 def run_web_server():
