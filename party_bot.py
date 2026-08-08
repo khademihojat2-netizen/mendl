@@ -19,6 +19,8 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
   Jamendo از سمت کاربر فیلتر بود، مشکلی برای پیدا کردن آهنگ پیش نیاد
 - چت‌بات هوشمند: با منشن کردن بات (@) یا ریپلای به پیامش، سوال بپرس
   و با Groq جواب می‌گیری
+- خوش‌آمدگویی شخصی‌سازی‌شده: هر عضو جدید یه پیام خوش‌آمد متفاوت و
+  بامزه با AI می‌گیره (نه یه متن ثابت تکراری)
 
 نصب:
     pip install python-telegram-bot==21.4 requests flask
@@ -96,12 +98,27 @@ async def welcome_with_party_button(update: Update, context: ContextTypes.DEFAUL
         return
 
     chat_id = update.effective_chat.id
-    names = ", ".join(m.first_name for m in update.message.new_chat_members)
+    members = update.message.new_chat_members
+    names = ", ".join(m.first_name for m in members)
     party_count[chat_id] = party_count.get(chat_id, 0) + 1
+
+    text = None
+    if GROQ_API_KEY:
+        text = await ask_groq(
+            "تو دستیار یه بات پارتی توی تلگرام هستی. یه پیام خوش‌آمدگویی کوتاه "
+            "(یک جمله، حداکثر ۲۰ کلمه)، شاد و بامزه به فارسی برای عضو جدید گروه بنویس. "
+            "حتماً اسمی که بهت میدم رو توش بیار. از ایموجی مرتبط با پارتی استفاده کن. "
+            "فقط خودِ پیام رو بنویس، بدون توضیح اضافه.",
+            f"اسم عضو جدید: {names}",
+            max_tokens=60,
+        )
+
+    if not text:
+        text = f"خوش اومدی {names}! برای شروع موزیک و نورهای پارتی دکمه زیر رو بزن 👇"
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"خوش اومدی {names}! برای شروع موزیک و نورهای پارتی دکمه زیر رو بزن 👇",
+        text=text,
         reply_markup=party_button(),
     )
 
