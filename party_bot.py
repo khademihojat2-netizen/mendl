@@ -11,9 +11,10 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
   - /party (بدون آرگومان) -> تم پیش‌فرض
 - پیام خداحافظی وقتی کسی گروه رو ترک می‌کنه
 - شمارنده‌ی تعداد دفعاتی که مهمونی شروع شده (در حافظه)
-- فیلتر ناسزا: تا ۳ اخطار، بعدش بلاک خودکار
-  - لایه سریع: لیست ثابت BAD_WORDS
-  - لایه هوشمند: تشخیص با هوش مصنوعی (Groq API - رایگان، نیاز به GROQ_API_KEY)
+- فیلتر ناسزا و اسپم: تا ۳ اخطار، بعدش بلاک خودکار
+  - لایه سریع: لیست ثابت BAD_WORDS + regex تشخیص لینک
+  - لایه هوشمند: طبقه‌بندی با هوش مصنوعی (Groq API - رایگان، نیاز به GROQ_API_KEY)
+    تشخیص می‌ده پیام ناسزاست، اسپم/تبلیغ/لینک مشکوکه، یا عادیه
 - هندلر خطا تا کرش نکنه اگه یه درخواست به تلگرام fail بشه
 - وب‌سرور واسطه (Flask) برای پروکسی درخواست موزیک به Jamendo، تا اگه
   Jamendo از سمت کاربر فیلتر بود، مشکلی برای پیدا کردن آهنگ پیش نیاد
@@ -30,6 +31,7 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
 """
 
 import os
+import re
 import logging
 import asyncio
 import threading
@@ -68,6 +70,9 @@ warnings = {}  # (chat_id, user_id) -> تعداد اخطارها
 BAD_WORDS = []
 
 MAX_WARNINGS = 3
+
+# لینک/دعوت گروه/کانال -> لایه‌ی سریع تشخیص اسپم (بدون نیاز به AI)
+LINK_REGEX = re.compile(r"(https?://\S+|t\.me/\S+|@\w{4,}\b)", re.IGNORECASE)
 
 # کلیدواژه‌ای که کاربر بعد از /party می‌نویسه -> کد تم (start_param)
 OCCASIONS = {
@@ -222,18 +227,26 @@ async def ask_groq(system_prompt: str, user_text: str, max_tokens: int = 300) ->
     return await asyncio.to_thread(call_api)
 
 
-async def ai_is_offensive(text: str) -> bool:
-    """پیام رو با Groq چک می‌کنه که ناسزا/توهین/فحش هست یا نه (فارسی یا هر زبان دیگه).
+async def ai_classify_message(text: str, has_link: bool) -> str | None:
+    """پیام رو با Groq طبقه‌بندی می‌کنه: 'ناسزا'، 'اسپم'، یا 'خیر'.
     فقط وقتی GROQ_API_KEY ست شده باشه فعاله."""
+    hint = " (این پیام یه لینک/منشن هم داره)" if has_link else ""
     reply = await ask_groq(
-        "تو یه فیلتر تشخیص ناسزا/فحش/توهین هستی. فقط با یک کلمه جواب بده: "
-        "'بله' اگه پیام حاوی فحش، ناسزا، توهین مستقیم به شخص، یا کلمات رکیک باشه "
-        "(حتی با غلط‌املایی عمدی یا حروف انگلیسی برای نوشتن فارسی)، "
-        "یا 'خیر' اگه پیام عادی و بی‌مشکل باشه.",
-        text,
+        "تو یه فیلتر مدیریت گروه تلگرام هستی. پیام کاربر رو بخون و فقط با یکی از "
+        "این سه کلمه جواب بده (بدون هیچ توضیح اضافه):\n"
+        "'ناسزا' اگه پیام فحش/توهین/کلمات رکیک داشت (حتی با غلط‌املایی عمدی)\n"
+        "'اسپم' اگه پیام تبلیغ، لینک مشکوک/فروش/کانال ناشناس، یا دعوت اسپم‌طور بود\n"
+        "'خیر' اگه پیام عادی، دوستانه، یا لینک بی‌ضرر (مثل عکس/آهنگ/جواب به بحث گروه) بود",
+        text + hint,
         max_tokens=5,
     )
-    return bool(reply) and reply.startswith("بله")
+    if not reply:
+        return None
+    if reply.startswith("ناسزا"):
+        return "ناسزا"
+    if reply.startswith("اسپم"):
+        return "اسپم"
+    return None
 
 
 async def ai_chat_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -268,20 +281,24 @@ async def ai_chat_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """هر پیام متنی گروه رو چک می‌کنه؛ اگه ناسزا/توهین بود، اخطار میده و بعد ۳ اخطار بلاک می‌کنه.
-    اول لیست ثابت BAD_WORDS چک می‌شه (سریع)، اگه چیزی پیدا نشد و AI فعال باشه،
-    از کلود برای تشخیص هوشمندتر (کنایه، غلط‌املایی عمدی، و...) استفاده می‌شه.
+    """هر پیام متنی گروه رو چک می‌کنه؛ اگه ناسزا یا اسپم/لینک مشکوک بود، اخطار میده
+    و بعد ۳ اخطار بلاک می‌کنه.
+    لایه سریع: لیست BAD_WORDS + regex لینک. لایه هوشمند: طبقه‌بندی با Groq.
     نیازمند اینه که بات توی گروه ادمین باشه با دسترسی 'Ban users' و 'Delete messages'."""
     if not update.message or not update.message.text:
         return
 
-    text_lower = update.message.text.lower()
-    flagged = bool(BAD_WORDS) and any(bad in text_lower for bad in BAD_WORDS)
+    text = update.message.text
+    text_lower = text.lower()
+    has_link = bool(LINK_REGEX.search(text))
 
-    if not flagged:
-        flagged = await ai_is_offensive(update.message.text)
+    reason = None
+    if BAD_WORDS and any(bad in text_lower for bad in BAD_WORDS):
+        reason = "ناسزا"
+    else:
+        reason = await ai_classify_message(text, has_link)
 
-    if not flagged:
+    if not reason:
         return
 
     chat_id = update.effective_chat.id
@@ -290,23 +307,25 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warnings[key] = warnings.get(key, 0) + 1
     count = warnings[key]
 
-    # پیام حاوی ناسزا رو حذف کن (اگه بات دسترسی حذف پیام داشته باشه)
+    # پیام حاوی ناسزا/اسپم رو حذف کن (اگه بات دسترسی حذف پیام داشته باشه)
     try:
         await update.message.delete()
     except TelegramError:
         pass
 
+    reason_text = "لطفاً درست صحبت کن" if reason == "ناسزا" else "لینک/تبلیغ اینجا مجاز نیست"
+
     if count < MAX_WARNINGS:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⚠️ {user.first_name} عزیز، لطفاً درست صحبت کن. اخطار {count} از {MAX_WARNINGS}.",
+            text=f"⚠️ {user.first_name} عزیز، {reason_text}. اخطار {count} از {MAX_WARNINGS}.",
         )
     else:
         try:
             await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"🚫 {user.first_name} به‌خاطر تکرار ناسزا از گروه بلاک شد.",
+                text=f"🚫 {user.first_name} به‌خاطر تکرار {reason} از گروه بلاک شد.",
             )
         except TelegramError as e:
             log.error("نتونستم کاربر رو بلاک کنم (احتمالاً بات ادمین نیست): %s", e)
