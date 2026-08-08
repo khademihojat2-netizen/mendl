@@ -22,6 +22,7 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
   و با Groq جواب می‌گیری
 - خوش‌آمدگویی شخصی‌سازی‌شده: هر عضو جدید یه پیام خوش‌آمد متفاوت و
   بامزه با AI می‌گیره (نه یه متن ثابت تکراری)
+- بازی تریویا: با /trivia یه سوال موزیک/پارتی می‌سازه، اولین جواب درست می‌بره
 
 نصب:
     pip install python-telegram-bot==21.4 requests flask
@@ -64,6 +65,7 @@ log = logging.getLogger("party_bot")
 
 party_count = {}  # chat_id -> تعداد دفعات شروع مهمونی
 warnings = {}  # (chat_id, user_id) -> تعداد اخطارها
+trivia_state = {}  # chat_id -> {"answer": str, "score": {user_id: count}}
 
 # ⚠️ لیست کلمات ناسزا/فحش رو خودت اینجا پر کن (حروف کوچیک، بدون فاصله اضافه).
 # مثال: BAD_WORDS = ["کلمه۱", "کلمه۲", "کلمه۳"]
@@ -96,6 +98,58 @@ def party_button(occasion_code: str | None = None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("ورود به مهمونی 🎉", url=url)]
     ])
+
+
+async def trivia_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """یه سوال تریویا/موزیک با AI می‌سازه؛ اولین نفری که درست جواب بده می‌بره."""
+    chat_id = update.effective_chat.id
+
+    if not GROQ_API_KEY:
+        await update.message.reply_text("این قابلیت نیاز به GROQ_API_KEY داره که هنوز ست نشده.")
+        return
+
+    reply = await ask_groq(
+        "یه سوال تریویای سرگرم‌کننده درباره‌ی موزیک، خواننده‌ها، یا فرهنگ پاپ/پارتی بساز "
+        "(سطح متوسط، نه خیلی سخت نه خیلی ساده). دقیقاً با همین فرمت جواب بده و هیچ چیز دیگه‌ای ننویس:\n"
+        "سوال: <متن سوال>\n"
+        "جواب: <جواب کوتاه، یک یا چند کلمه>",
+        "یه سوال تریویای جدید بساز",
+        max_tokens=150,
+    )
+    if not reply:
+        await update.message.reply_text("نتونستم سوال بسازم، دوباره امتحان کن.")
+        return
+
+    q_match = re.search(r"سوال:\s*(.+)", reply)
+    a_match = re.search(r"جواب:\s*(.+)", reply)
+    if not q_match or not a_match:
+        await update.message.reply_text("نتونستم سوال بسازم، دوباره امتحان کن.")
+        return
+
+    question = q_match.group(1).strip()
+    answer = a_match.group(1).strip()
+
+    trivia_state[chat_id] = {"answer": answer.lower()}
+    await update.message.reply_text(f"🎮 سوال تریویا:\n\n{question}\n\nاولین نفری که درست جواب بده می‌بره! 🏆")
+
+
+async def trivia_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """اگه یه سوال تریویا فعاله، جواب کاربر رو چک می‌کنه."""
+    chat_id = update.effective_chat.id
+    state = trivia_state.get(chat_id)
+    if not state or not update.message or not update.message.text:
+        return
+
+    guess = update.message.text.strip().lower()
+    correct_answer = state["answer"]
+
+    # تطبیق ساده: جواب دقیق یا وقتی جواب درست داخل پیام کاربر باشه
+    if guess == correct_answer or correct_answer in guess:
+        user = update.effective_user
+        del trivia_state[chat_id]
+        await update.message.reply_text(
+            f"🎉 آفرین {user.first_name}! جواب درست بود: «{state['answer']}» — تو بردی! 🏆"
+        )
 
 
 async def welcome_with_party_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -176,6 +230,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /party — شروع مهمونی با تم معمولی\n"
         f"{known}\n"
         "• /partystats — تعداد دفعاتی که مهمونی توی این گروه شروع شده\n"
+        "• /trivia — یه بازی تریویای موزیک/پارتی شروع کن\n"
         "• /help — همین راهنما\n\n"
         "هر عضو گروه می‌تونه این دستورها رو بزنه، محدودیتی نداره."
     )
@@ -343,6 +398,7 @@ async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("party", "شروع مهمونی (مثال: /party تولد یا /party سال_نو)"),
         BotCommand("partystats", "تعداد دفعاتی که مهمونی شروع شده"),
+        BotCommand("trivia", "شروع یه بازی تریویای موزیک/پارتی"),
         BotCommand("help", "راهنمای کامل دستورها و مناسبت‌ها"),
         BotCommand("start", "شروع کار با بات"),
     ])
@@ -408,10 +464,12 @@ def main():
     app.add_handler(CommandHandler("party", party_command))
     app.add_handler(CommandHandler("partystats", stats_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("trivia", trivia_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_with_party_button))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, goodbye_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderate_message), group=0)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat_reply), group=1)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, trivia_check), group=2)
     app.add_error_handler(error_handler)
 
     log.info("Party bot started...")
