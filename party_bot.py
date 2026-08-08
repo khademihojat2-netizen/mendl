@@ -15,9 +15,11 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
   - لایه سریع: لیست ثابت BAD_WORDS
   - لایه هوشمند: تشخیص با هوش مصنوعی (Groq API - رایگان، نیاز به GROQ_API_KEY)
 - هندلر خطا تا کرش نکنه اگه یه درخواست به تلگرام fail بشه
+- وب‌سرور واسطه (Flask) برای پروکسی درخواست موزیک به Jamendo، تا اگه
+  Jamendo از سمت کاربر فیلتر بود، مشکلی برای پیدا کردن آهنگ پیش نیاد
 
 نصب:
-    pip install python-telegram-bot==21.4 requests
+    pip install python-telegram-bot==21.4 requests flask
 
 اجرا:
     python party_bot.py
@@ -26,7 +28,9 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
 import os
 import logging
 import asyncio
+import threading
 import requests
+from flask import Flask, jsonify, request as flask_request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -68,6 +72,11 @@ OCCASIONS = {
     "سال نو": "newyear",
     "کریسمس": "christmas",
 }
+
+
+JAMENDO_CLIENT_ID = "b0cd7e21"
+MAX_TRACK_DURATION = 240
+DEFAULT_TAGS = "party+dance+electronic"
 
 
 def party_button(occasion_code: str | None = None):
@@ -267,7 +276,60 @@ async def post_init(app):
     ])
 
 
+# ---------------- وب‌سرور واسطه (پروکسی Jamendo) ----------------
+# چون خیلی از پروکسی/فیلترشکن‌های تلگرام فقط ترافیک خود تلگرام رو رد می‌کنن،
+# درخواست مستقیم Mini App به api.jamendo.com ممکنه فیلتر بشه. اینجا خودِ
+# سرور Railway (که فیلتر نیست) واسطه‌ست: Mini App به همینجا درخواست می‌ده،
+# اینجا از سمت سرور با Jamendo صحبت می‌کنه و جواب رو برمی‌گردونه.
+flask_app = Flask(__name__)
+
+
+@flask_app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+
+@flask_app.route("/track", methods=["GET"])
+def get_track():
+    tags = flask_request.args.get("tags", DEFAULT_TAGS)
+    try:
+        resp = requests.get(
+            "https://api.jamendo.com/v3.0/tracks/",
+            params={
+                "client_id": JAMENDO_CLIENT_ID,
+                "format": "json",
+                "limit": 40,
+                "tags": tags,
+                "durationbetween": f"30_{MAX_TRACK_DURATION}",
+                "order": "popularity_total",
+                "audioformat": "mp32",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return jsonify(resp.json())
+    except Exception as e:
+        log.error("خطا هنگام گرفتن ترک از Jamendo: %s", e)
+        return jsonify({"results": [], "error": str(e)}), 502
+
+
+@flask_app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
+
+
 def main():
+    # وب‌سرور واسطه رو توی یه thread جدا بالا میاریم تا هم‌زمان با بات کار کنه
+    threading.Thread(target=run_web_server, daemon=True).start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_command))
