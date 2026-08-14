@@ -489,7 +489,6 @@ def main():
     app.add_handler(CommandHandler("trivia", trivia_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_with_party_button))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, goodbye_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderate_message), group=0)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat_reply), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, trivia_check), group=2)
     app.add_error_handler(error_handler)
