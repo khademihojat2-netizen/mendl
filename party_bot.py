@@ -23,9 +23,13 @@ Party Bot - وقتی کسی وارد گروه تلگرام میشه (یا با �
 - خوش‌آمدگویی شخصی‌سازی‌شده: هر عضو جدید یه پیام خوش‌آمد متفاوت و
   بامزه با AI می‌گیره (نه یه متن ثابت تکراری)
 - بازی تریویا: با /trivia یه سوال موزیک/پارتی می‌سازه، اولین جواب درست می‌بره
+- فال روز خودکار: هر روز ساعت ۱۰ صبح (به‌وقت تهران) یه فال روزانه با AI می‌سازه و می‌فرسته
+- قیمت لحظه‌ای طلا/سکه/ارز: هر روز ساعت ۱۱، ۱۴، ۱۶ و ۲۰ (به‌وقت تهران) قیمت طلای ۱۸،
+  سکه تمام بهار آزادی، دلار و درهم رو از BrsApi می‌گیره و می‌فرسته
+  (نیاز به TARGET_CHAT_ID -- با دستور /chatid پیداش کن)
 
 نصب:
-    pip install python-telegram-bot==21.4 requests flask
+    pip install python-telegram-bot[job-queue]==21.4 requests flask
 
 اجرا:
     python party_bot.py
@@ -36,6 +40,8 @@ import re
 import logging
 import asyncio
 import threading
+import datetime
+from zoneinfo import ZoneInfo
 import requests
 from urllib.parse import urlparse
 from flask import Flask, jsonify, request as flask_request, Response, stream_with_context
@@ -49,6 +55,8 @@ from telegram.ext import (
     filters,
 )
 
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+
 # ---------------- تنظیمات ----------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 # لینک مستقیم Mini App که از BotFather (/newapp) گرفتی، شبیه:
@@ -60,6 +68,13 @@ MINI_APP_DEEPLINK = os.environ["MINI_APP_DEEPLINK"]
 # اگه ست نشه، فقط از لیست ثابت BAD_WORDS استفاده می‌شه (بدون هوش مصنوعی).
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+# چت آی‌دی گروهی که فال روز و قیمت طلا/ارز باید توش پست بشه.
+# با دستور /chatid داخل همون گروه پیداش کن و اینجا (env var) ست کن.
+TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID")
+
+# کلید رایگان BrsApi برای قیمت طلا/سکه/ارز (نیازی به ثبت‌نام نداره).
+BRSAPI_KEY = os.environ.get("BRSAPI_KEY", "FreeSV0E1LSgB9RDjuf0QorSLViX8pPG")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("party_bot")
@@ -232,6 +247,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{known}\n"
         "• /partystats — تعداد دفعاتی که مهمونی توی این گروه شروع شده\n"
         "• /trivia — یه بازی تریویای موزیک/پارتی شروع کن\n"
+        "• /chatid — آیدی همین چت رو نشون بده\n"
         "• /help — همین راهنما\n\n"
         "هر عضو گروه می‌تونه این دستورها رو بزنه، محدودیتی نداره."
     )
@@ -244,6 +260,83 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "برای دیدن همه‌ی دستورها /help رو بزن.",
         reply_markup=party_button(),
     )
+
+
+async def chatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """آیدی همین چت رو نشون می‌ده -- برای ست کردن TARGET_CHAT_ID لازمه."""
+    await update.message.reply_text(f"Chat ID همین گروه:\n`{update.effective_chat.id}`", parse_mode="Markdown")
+
+
+def fetch_gold_currency_prices():
+    """قیمت طلا ۱۸، سکه تمام بهار آزادی، دلار و درهم رو از BrsApi می‌گیره."""
+    resp = requests.get(
+        "https://Api.BrsApi.ir/Market/Gold_Currency.php",
+        params={"key": BRSAPI_KEY},
+        timeout=12,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    # داده معمولاً زیر یکی از این کلیدهاست؛ برای اطمینان هر دو حالت رو پوشش می‌دیم
+    items = []
+    if isinstance(data, dict):
+        items = data.get("gold", []) + data.get("currency", [])
+    elif isinstance(data, list):
+        items = data
+
+    def find(*keywords):
+        for item in items:
+            name = f"{item.get('name','')} {item.get('name_en','')} {item.get('symbol','')}"
+            if all(k in name for k in keywords):
+                return item.get("price") or item.get("value")
+        return None
+
+    gold18 = find("طلا", "۱۸") or find("18")
+    coin_bahar = find("بهار", "آزادی")
+    usd = find("دلار") or find("USD")
+    aed = find("درهم") or find("AED")
+
+    return {"gold18": gold18, "coin_bahar": coin_bahar, "usd": usd, "aed": aed}
+
+
+async def send_price_update(context: ContextTypes.DEFAULT_TYPE):
+    if not TARGET_CHAT_ID:
+        return
+    try:
+        prices = await asyncio.to_thread(fetch_gold_currency_prices)
+    except Exception as e:
+        log.error("خطا در گرفتن قیمت طلا/ارز: %s", e)
+        return
+
+    def fmt(v):
+        return f"{int(v):,} تومان" if v else "نامشخص"
+
+    text = (
+        "💰 قیمت لحظه‌ای بازار\n\n"
+        f"🥇 طلای ۱۸ عیار (هر گرم): {fmt(prices['gold18'])}\n"
+        f"🪙 سکه تمام بهار آزادی: {fmt(prices['coin_bahar'])}\n"
+        f"💵 دلار: {fmt(prices['usd'])}\n"
+        f"💴 درهم امارات: {fmt(prices['aed'])}"
+    )
+    await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
+
+
+async def send_daily_fal(context: ContextTypes.DEFAULT_TYPE):
+    if not TARGET_CHAT_ID:
+        return
+    fal_text = None
+    if GROQ_API_KEY:
+        fal_text = await ask_groq(
+            "تو یه فال‌گیر خوش‌زبون و امیدبخش فارسی هستی. یه «فال روز» کوتاه "
+            "(۳ تا ۴ جمله)، دلنشین و انرژی‌بخش برای امروز بنویس -- خودت "
+            "بسازش، نه از شعر یا متن کس دیگه‌ای. لحنش شاعرانه ولی ساده باشه.",
+            "فال امروز رو بساز",
+            max_tokens=150,
+        )
+    if not fal_text:
+        fal_text = "امروز روز خوبیه برای شروع یه کار تازه! دلت رو به نشاط بسپار 🌞"
+
+    await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=f"🔮 فال روز:\n\n{fal_text}")
 
 
 async def error_handler(update, context: ContextTypes.DEFAULT_TYPE):
@@ -487,11 +580,24 @@ def main():
     app.add_handler(CommandHandler("partystats", stats_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("trivia", trivia_command))
+    app.add_handler(CommandHandler("chatid", chatid_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_with_party_button))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, goodbye_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat_reply), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, trivia_check), group=2)
     app.add_error_handler(error_handler)
+
+    if TARGET_CHAT_ID:
+        app.job_queue.run_daily(send_daily_fal, time=datetime.time(hour=10, minute=0, tzinfo=TEHRAN_TZ), name="fal_e_ruz")
+        for hour in (11, 14, 16, 20):
+            app.job_queue.run_daily(
+                send_price_update,
+                time=datetime.time(hour=hour, minute=0, tzinfo=TEHRAN_TZ),
+                name=f"price_{hour}",
+            )
+        log.info("Scheduled jobs (fal + prices) registered for chat %s", TARGET_CHAT_ID)
+    else:
+        log.info("TARGET_CHAT_ID تنظیم نشده -- فال روز و قیمت‌ها فعال نیستن.")
 
     log.info("Party bot started...")
     app.run_polling()
